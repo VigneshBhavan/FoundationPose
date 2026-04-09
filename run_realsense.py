@@ -60,10 +60,10 @@ def get_yolo_mask(model, frame, conf=0.5):
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     code_dir = os.path.dirname(os.path.realpath(__file__))
-    parser.add_argument('--mesh_file', type=str,
-                        default='/home/vbhavanantha/datacentertask/assets/h1_gripper.obj')
-    parser.add_argument('--yolo_model', type=str,
-                        default='/home/vbhavanantha/Desktop/PoseEstimation/FoundationPose/gripper_dataset/runs/gripper_detect11/weights/best.pt')
+    parser.add_argument('--mesh_file', type=str, required=True,
+                        help='Path to object mesh file (.obj)')
+    parser.add_argument('--yolo_model', type=str, required=True,
+                        help='Path to trained YOLO detection model (best.pt)')
     parser.add_argument('--est_refine_iter', type=int, default=5)
     parser.add_argument('--track_refine_iter', type=int, default=1)
     parser.add_argument('--debug', type=int, default=1)
