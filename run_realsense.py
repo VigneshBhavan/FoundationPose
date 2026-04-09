@@ -12,9 +12,9 @@ import pyrealsense2 as rs
 import cv2
 import numpy as np
 from ultralytics import YOLO
-import torch
 import json
 import zmq
+import time
 from scipy.spatial.transform import Rotation
 
 
@@ -24,7 +24,12 @@ def get_realsense_pipeline():
     config = rs.config()
     config.enable_stream(rs.stream.color, 424, 240, rs.format.rgb8, 60)
     config.enable_stream(rs.stream.depth, 424, 240, rs.format.z16, 60)
-    profile = pipeline.start(config)
+    try:
+        profile = pipeline.start(config)
+    except RuntimeError as e:
+        logging.error(f"Failed to start RealSense camera: {e}")
+        logging.error("Is a RealSense camera connected? Check with realsense-viewer.")
+        sys.exit(1)
 
     # Get intrinsics
     color_stream = profile.get_stream(rs.stream.color).as_video_stream_profile()
@@ -72,6 +77,8 @@ if __name__ == '__main__':
     parser.add_argument('--zmq_port', type=int, default=5555)
     parser.add_argument('--zmq_connect', type=str, default=None,
                         help='Connect to remote ZMQ XSUB (e.g. robot IP). If not set, binds locally.')
+    parser.add_argument('--prune_keep_rate', type=float, default=1.0,
+                        help='Score pruning: keep this fraction of hypotheses per refine iter (e.g. 0.5). 1.0=off (default).')
     parser.add_argument('--extrinsics', type=str, default=None,
                         help='Path to base_to_external_transform.json. If set, publishes poses in robot base frame.')
     args = parser.parse_args()
@@ -135,7 +142,6 @@ if __name__ == '__main__':
     center_pose = None
     pose_log = []
     frame_idx = 0
-    import time
     fps_time = time.time()
     fps_count = 0
     fps = 0.0
@@ -161,7 +167,8 @@ if __name__ == '__main__':
                 if conf >= 0.5:
                     logging.info(f"YOLO detection conf={conf:.2f}, running initial pose estimation...")
                     pose = est.register(K=K, rgb=color, depth=depth, ob_mask=mask,
-                                        iteration=args.est_refine_iter)
+                                        iteration=args.est_refine_iter,
+                                        prune_keep_rate=args.prune_keep_rate)
                     center_pose = pose @ np.linalg.inv(to_origin)
                     log_entry = {
                         "frame": frame_idx,
@@ -174,8 +181,19 @@ if __name__ == '__main__':
                     pose_log.append(log_entry)
                     logging.info(f"Initial pose:\n{pose}")
             else:
-                pose = est.track_one(rgb=color, depth=depth, K=K,
-                                     iteration=args.track_refine_iter)
+                try:
+                    pose = est.track_one(rgb=color, depth=depth, K=K,
+                                         iteration=args.track_refine_iter)
+                    if np.any(np.isnan(pose)) or np.linalg.norm(pose[:3, 3]) > 5.0:
+                        logging.warning("Tracking diverged, resetting...")
+                        pose = None
+                        center_pose = None
+                        continue
+                except Exception as e:
+                    logging.warning(f"Tracking failed: {e}, resetting...")
+                    pose = None
+                    center_pose = None
+                    continue
                 center_pose = pose @ np.linalg.inv(to_origin)
                 log_entry = {
                     "frame": frame_idx,
@@ -190,7 +208,6 @@ if __name__ == '__main__':
             # Debug: print raw camera-frame pose every 30 frames (~0.5s)
             if pose is not None and frame_idx % 30 == 0:
                 t_cam = pose[:3, 3]
-                import sys
                 print(f"\n>>> POSE [{frame_idx:5d}] cam_xyz=[{t_cam[0]:.4f} {t_cam[1]:.4f} {t_cam[2]:.4f}] <<<\n", file=sys.stderr, flush=True)
 
             # Publish pose over ZMQ
@@ -213,8 +230,9 @@ if __name__ == '__main__':
             vis = cv2.cvtColor(color, cv2.COLOR_RGB2BGR)
             if center_pose is not None:
                 vis_rgb = draw_posed_3d_box(K, img=color.copy(), ob_in_cam=center_pose, bbox=bbox)
-                vis = draw_xyz_axis(vis_rgb, ob_in_cam=center_pose, scale=0.05, K=K,
-                                    thickness=2, transparency=0, is_input_rgb=True)
+                vis_rgb = draw_xyz_axis(vis_rgb, ob_in_cam=center_pose, scale=0.05, K=K,
+                                        thickness=2, transparency=0, is_input_rgb=True)
+                vis = cv2.cvtColor(vis_rgb, cv2.COLOR_RGB2BGR)
             else:
                 cv2.putText(vis, "Waiting for detection...", (5, 30),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 1)

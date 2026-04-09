@@ -12,7 +12,6 @@ import pyrealsense2 as rs
 import cv2
 import numpy as np
 from ultralytics import YOLO
-import torch
 import json
 import zmq
 import time
@@ -25,7 +24,12 @@ def get_realsense_pipeline():
     config = rs.config()
     config.enable_stream(rs.stream.color, 424, 240, rs.format.rgb8, 60)
     config.enable_stream(rs.stream.depth, 424, 240, rs.format.z16, 60)
-    profile = pipeline.start(config)
+    try:
+        profile = pipeline.start(config)
+    except RuntimeError as e:
+        logging.error(f"Failed to start RealSense camera: {e}")
+        logging.error("Is a RealSense camera connected? Check with realsense-viewer.")
+        sys.exit(1)
 
     # Get intrinsics
     color_stream = profile.get_stream(rs.stream.color).as_video_stream_profile()
@@ -182,8 +186,19 @@ if __name__ == '__main__':
                     pose_log.append(log_entry)
                     logging.info(f"Initial pose:\n{pose}")
             else:
-                pose = est.track_one(rgb=color, depth=depth, K=K,
-                                     iteration=args.track_refine_iter)
+                try:
+                    pose = est.track_one(rgb=color, depth=depth, K=K,
+                                         iteration=args.track_refine_iter)
+                    if np.any(np.isnan(pose)) or np.linalg.norm(pose[:3, 3]) > 5.0:
+                        logging.warning("Tracking diverged, resetting...")
+                        pose = None
+                        center_pose = None
+                        continue
+                except Exception as e:
+                    logging.warning(f"Tracking failed: {e}, resetting...")
+                    pose = None
+                    center_pose = None
+                    continue
                 center_pose = pose @ np.linalg.inv(to_origin)
                 log_entry = {
                     "frame": frame_idx,
@@ -220,8 +235,9 @@ if __name__ == '__main__':
             vis = cv2.cvtColor(color, cv2.COLOR_RGB2BGR)
             if center_pose is not None:
                 vis_rgb = draw_posed_3d_box(K, img=color.copy(), ob_in_cam=center_pose, bbox=bbox)
-                vis = draw_xyz_axis(vis_rgb, ob_in_cam=center_pose, scale=0.05, K=K,
-                                    thickness=2, transparency=0, is_input_rgb=True)
+                vis_rgb = draw_xyz_axis(vis_rgb, ob_in_cam=center_pose, scale=0.05, K=K,
+                                        thickness=2, transparency=0, is_input_rgb=True)
+                vis = cv2.cvtColor(vis_rgb, cv2.COLOR_RGB2BGR)
             else:
                 cv2.putText(vis, "Waiting for detection...", (5, 30),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 1)
